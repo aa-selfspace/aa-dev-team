@@ -1,0 +1,70 @@
+name: MacOS-Remote-Tailscale
+on: workflow_dispatch
+
+jobs:
+  secure-vnc:
+    runs-on: macos-latest
+    timeout-minutes: 360
+    steps:
+      - name: Configure macOS Screen Sharing
+        run: |
+          # Enable Screen Sharing (VNC) via the kickstart utility
+          # We set a temporary VNC password "Runner123!" for the initial handshake
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -allowAccessFor -allUsers -privs -all \
+            -clientopts -setvncpassword -vncpasswd "Runner123!" \
+            -restart -agent -menu
+
+      - name: Create Remote User
+        run: |
+          # Defining credentials
+          USER_NAME="admin"
+          USER_PASS="MacOS@Secure123"
+          
+          # Create the user and grant admin privileges
+          sudo sysadminctl -addUser $USER_NAME -fullName "Remote Admin" -password "$USER_PASS" -admin
+          
+          # Mask the password so it doesn't show in logs
+          echo "::add-mask::$USER_PASS"
+          echo "VNC_USER=$USER_NAME" >> $GITHUB_ENV
+          echo "VNC_PASS=$USER_PASS" >> $GITHUB_ENV
+
+      - name: Install and Start Tailscale
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          # Use Homebrew to install Tailscale (handles paths better)
+          brew install tailscale
+          
+          # Start the Tailscale daemon background service
+          sudo tailscaled install-system-daemon
+          
+          # Connect to your Tailnet
+          sudo tailscale up --authkey=$TS_AUTHKEY --hostname=gh-mac-$GITHUB_RUN_ID
+          
+          # Wait for Tailscale to assign an IP address
+          sleep 5
+          TS_IP=$(tailscale ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Verify Connection & Display Info
+        run: |
+          echo "--- ACCESS DETAILS ---"
+          echo "Tailscale IP: $TAILSCALE_IP"
+          echo "Username: $VNC_USER"
+          echo "Password: $VNC_PASS"
+          echo "Connection String: vnc://$TAILSCALE_IP"
+          echo "-----------------------"
+          
+          # Final check to ensure the port 5900 is listening
+          nc -zv localhost 5900
+
+      - name: Keep Runner Alive
+        run: |
+          echo "Runner is active. Connect using your VNC client."
+          echo "The job will auto-terminate after 6 hours."
+          # Loop to prevent the action from finishing
+          while true; do
+            echo "[$(date)] Session still active..."
+            sleep 300
+          done
