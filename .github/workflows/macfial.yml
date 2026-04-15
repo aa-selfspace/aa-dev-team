@@ -1,0 +1,85 @@
+name: MacOS-Remote-Verified
+on: workflow_dispatch
+
+jobs:
+  secure-vnc:
+    runs-on: macos-latest
+    timeout-minutes: 360
+    steps:
+      - name: Force Virtual Display Initialization
+        run: |
+          # Disable screen lock and set a long sleep timer so the screen doesn't go dark
+          sudo -u $(stat -f%Su /dev/console) defaults write com.apple.screensaver idleTime 0
+          sudo -u $(stat -f%Su /dev/console) defaults write com.apple.PowerManagement "Display Sleep" 0
+          
+          # Force the window server to assume a monitor is attached
+          sudo defaults write /Library/Preferences/com.apple.windowserver DisplayAnywhere -bool YES
+          sudo defaults write /Library/Preferences/com.apple.windowserver Transitions -bool NO
+          
+          # Refresh the login window
+          sudo killall -HUP loginwindow
+          sleep 10
+
+      - name: Configure Screen Sharing & VNC
+        run: |
+          # Set the VNC password directly into the data file (more reliable than kickstart flags)
+          # Handshake Password: RunnerPassword!
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -clientopts -setvncpassword -vncpasswd "RunnerPassword!" \
+            -allowAccessFor -allUsers -privs -all
+
+          # Restart the agent to ensure it's listening
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent
+
+      - name: Create Remote Admin User
+        run: |
+          # Username: admin | Password: MacOS@Secure123
+          USER_NAME="admin"
+          USER_PASS="MacOS@Secure123"
+          
+          # Use dscl to create user if sysadminctl is being stubborn
+          sudo sysadminctl -addUser $USER_NAME -fullName "Remote Admin" -password "$USER_PASS" -admin
+          
+          echo "::add-mask::$USER_PASS"
+          echo "VNC_USER=$USER_NAME" >> $GITHUB_ENV
+          echo "VNC_PASS=$USER_PASS" >> $GITHUB_ENV
+
+      - name: Setup Tailscale Connectivity
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          # Use the official install script for macOS
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+          # Start the daemon
+          sudo tailscaled install-system-daemon
+          
+          # Bring up Tailscale
+          sudo tailscale up --authkey=$TS_AUTHKEY --hostname=gh-mac-$(date +%s)
+          
+          sleep 5
+          TS_IP=$(tailscale ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Final Connection & Keep-Alive
+        run: |
+          echo "------------------------------------------"
+          echo "MACOS REMOTE ACCESS READY"
+          echo "Address: $TAILSCALE_IP"
+          echo "VNC Handshake: RunnerPassword!"
+          echo "Login Username: $VNC_USER"
+          echo "Login Password: $VNC_PASS"
+          echo "------------------------------------------"
+          
+          # Verify local port 5900
+          if ! nc -zv localhost 5900; then
+            echo "Warning: Port 5900 not responding locally. Attempting final reset..."
+            sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent
+          fi
+
+          # Prevent job exit
+          while true; do
+            echo "[$(date)] Mac Active. Keep this tab open."
+            sleep 300
+          done
