@@ -1,0 +1,92 @@
+name: MacOS-Remote-Ultra
+on: workflow_dispatch
+
+jobs:
+  secure-vnc:
+    runs-on: macos-latest
+    timeout-minutes: 360
+    steps:
+      - name: Initialize Virtual Display & Fix Black Screen
+        run: |
+          echo "Forcing WindowServer to initialize..."
+          # Force the login window to surface and ignore headless state
+          sudo defaults write /Library/Preferences/com.apple.loginwindow LastExternalDisplayMode 1
+          
+          # Set a standard resolution to wake up the frame buffer
+          # This helps avoid the 0x0 resolution black screen bug
+          sudo SetResolution 1280 800 || echo "SetResolution not found, skipping..."
+          
+          # Restart the login window process to apply changes
+          sudo killall -HUP loginwindow
+          sleep 10
+
+      - name: Configure Screen Sharing (Aggressive Mode)
+        run: |
+          echo "Configuring Remote Management..."
+          # Stop and reset any existing ARD/VNC agents
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -deactivate -stop
+          
+          # Enable Screen Sharing and set the VNC Handshake password
+          # Handshake password: RunnerPassword!
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -allowAccessFor -allUsers -privs -all \
+            -clientopts -setvncpassword -vncpasswd "RunnerPassword!" \
+            -restart -agent -menu
+          
+          # Verify the service is loaded
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+
+      - name: Create Admin User
+        run: |
+          # These are your login credentials for the macOS Lock Screen
+          USER_NAME="admin"
+          USER_PASS="MacOS@Secure123"
+          
+          sudo sysadminctl -addUser $USER_NAME -fullName "Remote Admin" -password "$USER_PASS" -admin
+          
+          echo "::add-mask::$USER_PASS"
+          echo "VNC_USER=$USER_NAME" >> $GITHUB_ENV
+          echo "VNC_PASS=$USER_PASS" >> $GITHUB_ENV
+
+      - name: Install and Start Tailscale
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          # Use Homebrew for reliable pathing
+          brew install tailscale
+          sudo tailscaled install-system-daemon
+          sudo tailscale up --authkey=$TS_AUTHKEY --hostname=gh-mac-$GITHUB_RUN_ID
+          
+          sleep 5
+          TS_IP=$(tailscale ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Final Connection Check
+        run: |
+          echo "=========================================="
+          echo "CONNECTION DETAILS"
+          echo "Address: $TAILSCALE_IP"
+          echo "VNC Handshake Password: RunnerPassword!"
+          echo "macOS Login User: $VNC_USER"
+          echo "macOS Login Pass: $VNC_PASS"
+          echo "=========================================="
+          
+          # Final check for Port 5900
+          for i in {1..10}; do
+            if nc -zv localhost 5900; then
+              echo "VNC Server is ACTIVE."
+              exit 0
+            fi
+            echo "Waiting for screen to render (attempt $i)..."
+            sleep 5
+          done
+          echo "VNC service failed to start."
+          exit 1
+
+      - name: Keep Runner Alive
+        run: |
+          while true; do
+            echo "[$(date)] Session Active. Connect to $TAILSCALE_IP"
+            sleep 300
+          done
