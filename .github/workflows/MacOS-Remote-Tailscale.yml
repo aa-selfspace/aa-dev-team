@@ -6,25 +6,24 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 360
     steps:
-      - name: Configure macOS Screen Sharing
+      - name: Force Enable Screen Sharing
         run: |
-          # Enable Screen Sharing (VNC) via the kickstart utility
-          # We set a temporary VNC password "Runner123!" for the initial handshake
+          # 1. Enable the service using the launchctl-managed background agent
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+          
+          # 2. Use kickstart to configure permissions and set the password
+          # We use a simple password "Runner123!" for the initial VNC handshake
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -allowAccessFor -allUsers -privs -all \
+            -activate -configure -access -on \
+            -allowAccessFor -allUsers -privs -all \
             -clientopts -setvncpassword -vncpasswd "Runner123!" \
-            -restart -agent -menu
+            -restart -agent
 
       - name: Create Remote User
         run: |
-          # Defining credentials
           USER_NAME="admin"
           USER_PASS="MacOS@Secure123"
-          
-          # Create the user and grant admin privileges
           sudo sysadminctl -addUser $USER_NAME -fullName "Remote Admin" -password "$USER_PASS" -admin
-          
-          # Mask the password so it doesn't show in logs
           echo "::add-mask::$USER_PASS"
           echo "VNC_USER=$USER_NAME" >> $GITHUB_ENV
           echo "VNC_PASS=$USER_PASS" >> $GITHUB_ENV
@@ -33,38 +32,38 @@ jobs:
         env:
           TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          # Use Homebrew to install Tailscale (handles paths better)
           brew install tailscale
-          
-          # Start the Tailscale daemon background service
           sudo tailscaled install-system-daemon
-          
-          # Connect to your Tailnet
           sudo tailscale up --authkey=$TS_AUTHKEY --hostname=gh-mac-$GITHUB_RUN_ID
-          
-          # Wait for Tailscale to assign an IP address
           sleep 5
           TS_IP=$(tailscale ip -4)
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
 
-      - name: Verify Connection & Display Info
+      - name: Verify Connection & Keep Alive
         run: |
           echo "--- ACCESS DETAILS ---"
           echo "Tailscale IP: $TAILSCALE_IP"
           echo "Username: $VNC_USER"
           echo "Password: $VNC_PASS"
-          echo "Connection String: vnc://$TAILSCALE_IP"
+          echo "VNC URL: vnc://$TAILSCALE_IP"
           echo "-----------------------"
           
-          # Final check to ensure the port 5900 is listening
-          nc -zv localhost 5900
+          # Attempt to check the port 3 times before failing
+          for i in {1..5}; do
+            if nc -zv localhost 5900; then
+              echo "SUCCESS: VNC Port 5900 is open and listening!"
+              break
+            else
+              echo "Attempt $i: VNC port not ready yet... retrying in 5s"
+              sleep 5
+            fi
+            if [ $i -eq 5 ]; then
+              echo "ERROR: VNC failed to start after 5 attempts."
+              exit 1
+            fi
+          done
 
-      - name: Keep Runner Alive
-        run: |
-          echo "Runner is active. Connect using your VNC client."
-          echo "The job will auto-terminate after 6 hours."
-          # Loop to prevent the action from finishing
           while true; do
-            echo "[$(date)] Session still active..."
+            echo "[$(date)] macOS Runner Active..."
             sleep 300
           done
